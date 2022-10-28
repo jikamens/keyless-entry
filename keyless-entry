@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+
+# Copyright 2022 Jonathan Kamens <jik@kamens.us>.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+# This script temporarily or persistently configures your
+# LUKS-encrypted Linux system to reboot without a key needing to be
+# typed. It's based on the mechanism documented by Igor Mišić in
+# https://askubuntu.com/a/997668. The idea is to configure a
+# decryption key that is stored in a static key file on disk, and then
+# to configure the system to use that key file when you want to reboot
+# without typing a key, and not otherwise.
+#
+# Run the script with one of these arguments:
+#
+# configure     - Set things up without enabling keyless entry
+# unconfigure   - Disable if enabled, remove configuration completely
+# enable-once   - Enable keyless entry just for the next reboot
+# enable-always - Enable keyless entry until it's disabled
+# disable       - Disable keyless entry
+#
+# enable-once works by doing configuring /etc/rc.local to call the
+# script with the disable argument at the end of the reboot sequence,
+# so wherever you invoke the script from with enable-once needs to be
+# accessible on boot and executable or it won't work.
+#
+# You will be prompted to enter an existing LUKS key (passphrase)
+# once for each encrypted device during configure.
+#
+# When configured, the following files are created:
+#
+# /etc/keyless-entry.conf - stores persistent state
+# /boot/keyless-entry - stores the decryption key
+# /etc/crypttab.keyful - copy of original /etc/crypttab
+# /etc/crypttab.keyless - crypttab configured for keyless entry
+#
+# When enable-once is called, /etc/rc.local is also modified, creating
+# if it it doesn't exist. The changes to /etc/rc.local are removed
+# after reboot.
+#
+# When enable-once, enable-always, or disable is called, the initial
+# ramdisk (initrd) for each installed kernel is modified. The initrds
+# will also be modified when disable is called if keyless entry was
+# previously enabled.
+
+import argparse
+import configparser
+import filecmp
+import json
+import re
+import os
+import random
+import shutil
+import string
+import subprocess
+import sys
+
+config_file = '/etc/keyless-entry.conf'
+key_file_tail = '/keyless-entry'
+key_file = f'/boot{key_file_tail}'
+crypttab_file = '/etc/crypttab'
+keyful_file = f'{crypttab_file}.keyful'
+keyless_file = f'{crypttab_file}.keyless'
+rc_local = '/etc/rc.local'
+
+config = None
+
+
+def load_config():
+    global config
+    if config is None:
+        config = configparser.ConfigParser()
+        config.read(config_file)
+    if 'settings' not in config:
+        config['settings'] = {}
+
+
+def save_config():
+    with open(f'{config_file}.new', 'w') as f:
+        config.write(f)
+    os.rename(f'{config_file}.new', config_file)
+
+
+def get_boot_mountpoint():
+    ud = '/dev/disk/by-uuid'
+    findmnt = json.loads(subprocess.check_output(('findmnt', '-J', '/boot')))
+    real_device = os.path.basename(findmnt['filesystems'][0]['source'])
+    links = os.listdir(ud)
+    for link in links:
+        try:
+            target = os.readlink(f'{ud}/{link}')
+        except Exception:
+            continue
+        if target.endswith(real_device):
+            return f'{ud}/{link}'
+    raise Exception(f'Could not find by-uuid device for {real_device}')
+
+
+def make_keyless_content(keyful_file):
+    content = ''
+    filesystems = []
+    boot_mountpoint = get_boot_mountpoint()
+    for line in open(keyful_file):
+        line = re.sub(r'#.*', '', line).strip()
+        if not line:
+            continue
+        (target, source, keyfile, options) = line.split()
+        if keyfile != 'none':
+            sys.exit(
+                f"Can't work when key file already specified in {keyful_file}")
+        if not options:
+            sys.exit(f"Can't work when options not specified in {keyful_file}")
+        if 'keyscript' in options:
+            sys.exit(
+                f"Can't work when keyscript already specified in "
+                f"{keyful_file}")
+        keyfile = f'{boot_mountpoint}:{key_file_tail}'
+        options += ',keyscript=/lib/cryptsetup/scripts/passdev'
+        content += f'{target} {source} {keyfile} {options}\n'
+        filesystems.append((target, source))
+    return filesystems, content
+
+
+def in_rc_local():
+    try:
+        next(line for line in open(rc_local)
+             if f'{os.path.basename(sys.argv[0])} disable' in line)
+        return True
+    except Exception:
+        pass
+    return False
+
+
+def remove_from_rc_local():
+    lines = [line for line in open(rc_local)
+             if f'{os.path.basename(sys.argv[0])} disable' not in line]
+    if len(lines) > 1:  # Something besides the #! line
+        with open(f'{rc_local}.new', 'w') as f:
+            f.write(''.join(lines))
+        os.chmod(f'{rc_local}.new', 0o744)
+        os.rename(f'{rc_local}.new', rc_local)
+    else:
+        os.remove(rc_local)
+
+
+def add_to_rc_local():
+    with open(f'{rc_local}.new', 'w') as out:
+        try:
+            with open(rc_local) as _in:
+                old = _in.read()
+                if old and not re.match(
+                        r'^#!\s*(?:/usr)?/bin/(?:env\s+)?(sh|bash)\b', old):
+                    sys.exit(f"Don't know how to safely add to {rc_local} "
+                             f"as it is currently formatted")
+        except FileNotFoundError:
+            old = '#!/bin/sh\n'
+        out.write(old)
+        print(f'{os.path.realpath(sys.argv[0])} disable', file=out)
+    os.chmod(f'{rc_local}.new', 0o744)
+    os.rename(f'{rc_local}.new', rc_local)
+
+
+def configure(args):
+    # Load config.
+    # Abort if already configured.
+    # Abort if any of the files we use unexpectedly already exist.
+    # Abort if crypttab does not exist.
+    # Abort if crypttab has unexpected format.
+    # Create key file.
+    # Add keys to LUKS, saving sources in config.
+    # Copy crypttab to crypttab.keyful.
+    # Save crypttab.keyless.
+    # Set configured to true in config.
+    # Save config.
+    load_config()
+    if 'configured' in config['settings']:
+        sys.exit('Already configured')
+    for file in (key_file, keyful_file, keyless_file):
+        if os.path.exists(file):
+            sys.exit(
+                f"Can't configure when {file} already unexpectedly exists")
+    if not os.path.exists(crypttab_file):
+        sys.exit(f'{crypttab_file} does not exist')
+    # This will abort if /etc/crypttab is missing or has unexpected format.
+    filesystems, keyless_content = make_keyless_content(crypttab_file)
+    with open(f'{key_file}.new', 'w') as f:
+        os.chmod(f'{key_file}.new', 0o400)
+        f.write(''.join(random.choices(string.ascii_letters, k=64)))
+    os.rename(f'{key_file}.new', key_file)
+    for fs_num in range(len(filesystems)):
+        (target, source) = filesystems[fs_num]
+        if len(filesystems) > 1:
+            print(f'Adding key to {target}')
+        subprocess.check_call(('cryptsetup', 'luksAddKey', source, key_file))
+        config['settings'][f'source{fs_num}'] = source
+    shutil.copyfile(crypttab_file, keyful_file)
+    with open(f'{keyless_file}.new', 'w') as f:
+        f.write(keyless_content)
+    os.rename(f'{keyless_file}.new', keyless_file)
+    config['settings']['configured'] = 'true'
+    save_config()
+
+
+def unconfigure(args):
+    # Load config.
+    # Abort if not configured.
+    # Abort if enabled.
+    # Delete crypttab.keyless.
+    # Delete crypttab.keyful.
+    # Remove keys from LUKS.
+    # Remove key file.
+    # Delete config.
+    load_config()
+    if not config.getboolean('settings', 'configured', fallback=False):
+        sys.exit("Can't unconfigure when not configured")
+    if config.getboolean('settings', 'enabled', fallback=False):
+        sys.exit("Please disable before unconfiguring")
+    os.remove(keyless_file)
+    os.remove(keyful_file)
+    for source_key in (k for k in config['settings'].keys()
+                       if k.startswith('source')):
+        source = config['settings'][source_key]
+        subprocess.check_call(
+            ('cryptsetup', 'luksRemoveKey', source, key_file))
+    os.remove(key_file)
+    os.remove(config_file)
+
+
+def enable_once(args):
+    # Load config.
+    # Abort if already enabled and in rc.local
+    # enable-always if not already enabled.
+    # Add disable command to rc.local.
+    load_config()
+    if config.getboolean('settings', 'enabled', fallback=False):
+        if in_rc_local():
+            sys.exit('Already enabled once')
+    else:
+        enable_always(args, once=True)
+    add_to_rc_local()
+
+
+def enable_always(args, once=False):
+    # Load config.
+    # Abort if not configured.
+    # Abort if already enabled, unless not doing once and in rc.local, in
+    # which case remove from rc.local.
+    # Abort if crypttab is different from crypttab.keyful.
+    # Replace crypttab with crypttab.keyless.
+    # Regenerate initrds.
+    # Set enabled to true in config.
+    # Save config.
+    load_config()
+    if not config.getboolean('settings', 'configured', fallback=False):
+        sys.exit('You need to configure before enabling')
+    if config.getboolean('settings', 'enabled', fallback=False):
+        if not once and in_rc_local():
+            remove_from_rc_local()
+            print('Switched from once to always')
+            return
+        sys.exit('Already enabled')
+    if not filecmp.cmp(crypttab_file, keyful_file):
+        sys.exit(f'{crypttab_file} is different from {keyful_file}, aborting')
+    shutil.copyfile(keyless_file, crypttab_file)
+    subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    config['settings']['enabled'] = 'true'
+    save_config()
+
+
+def disable(args):
+    # Load config.
+    # Abort if not configured.
+    # Abort if not enabled.
+    # Abort if crypttab is different from crypttab.keyless.
+    # Replace crypttab with crypttab.keyful.
+    # Regenerate initrds.
+    # Remove enabled setting from config.
+    # Save config.
+    # Remove disable command from rc.local if it's there.
+    load_config()
+    if not config.getboolean('settings', 'configured', fallback=False):
+        sys.exit("Can't disable if not yet configured")
+    if not config.getboolean('settings', 'enabled', fallback=False):
+        sys.exit("Can't disable if not enabled")
+    if not filecmp.cmp(crypttab_file, keyless_file):
+        sys.exit(f'{crypttab_file} is different from {keyless_file}, aborting')
+    shutil.copyfile(keyful_file, crypttab_file)
+    subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    del config['settings']['enabled']
+    save_config()
+    if in_rc_local():
+        remove_from_rc_local()
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Manage password-free '
+                                     'reboots of encrypted Linux hosts')
+    subparsers = parser.add_subparsers(required=True)
+    configure_parser = subparsers.add_parser('configure')
+    configure_parser.set_defaults(func=configure)
+    unconfigure_parser = subparsers.add_parser('unconfigure')
+    unconfigure_parser.set_defaults(func=unconfigure)
+    enable_once_parser = subparsers.add_parser('enable-once')
+    enable_once_parser.set_defaults(func=enable_once)
+    enable_always_parser = subparsers.add_parser('enable-always')
+    enable_always_parser.set_defaults(func=enable_always)
+    disable_parser = subparsers.add_parser('disable')
+    disable_parser.set_defaults(func=disable)
+
+    args = parser.parse_args()
+    return args
+
+
+def main():
+    args = parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()
