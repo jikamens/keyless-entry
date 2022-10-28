@@ -17,7 +17,7 @@
 
 # This script temporarily or persistently configures your
 # LUKS-encrypted Linux system to reboot without a key needing to be
-# typed. It's based on the mechanism documented by Igor Mišić in
+# typed. It's based on the mechanism documented by Tobias in
 # https://askubuntu.com/a/997668. The idea is to configure a
 # decryption key that is stored in a static key file on disk, and then
 # to configure the system to use that key file when you want to reboot

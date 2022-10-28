@@ -13,9 +13,10 @@ want to be able to reboot your system without needing to enter a
 decryption key on reboot, e.g., if you need to reboot it remotely.
 This script helps you do that.
 
-The mechanism of this script is based on the approach that Igor Mišić
-outlined in <https://askubuntu.com/a/997668>. Thank you to Igor for
-leading the way!
+The mechanism of this script is based on the approach that
+[Tobias](https://askubuntu.com/users/344231/tobias) outlined in
+<https://askubuntu.com/a/997668>. Thank you to Tobias for leading the
+way!
 
 Installation
 ------------
