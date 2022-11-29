@@ -37,7 +37,12 @@
 # accessible on boot and executable or it won't work.
 #
 # You will be prompted to enter an existing LUKS key (passphrase)
-# once for each encrypted device during configure.
+# once for each encrypted device during configure. This will add a 
+# master key for each should be stored on an encrypted partition to allow
+# us to add/remove one-time keys every time we enable/disable keyless
+# without requiring user input.  The only key that is readable when 
+# the source is encrypted is temporary and can't be used to unlock
+# the source partition when keyless is disabled.
 #
 # When configured, the following files are created:
 #
@@ -54,6 +59,9 @@
 # ramdisk (initrd) for each installed kernel is modified. The initrds
 # will also be modified when disable is called if keyless entry was
 # previously enabled.
+#
+
+
 
 import argparse
 import configparser
@@ -73,6 +81,7 @@ key_file = f'/boot{key_file_tail}'
 crypttab_file = '/etc/crypttab'
 keyful_file = f'{crypttab_file}.keyful'
 keyless_file = f'{crypttab_file}.keyless'
+rootkey_file = f'/etc/keyless-master'
 rc_local = '/etc/rc.local'
 
 config = None
@@ -178,7 +187,7 @@ def configure(args):
     # Abort if any of the files we use unexpectedly already exist.
     # Abort if crypttab does not exist.
     # Abort if crypttab has unexpected format.
-    # Create key file.
+    # Create master key file.
     # Add keys to LUKS, saving sources in config.
     # Copy crypttab to crypttab.keyful.
     # Save crypttab.keyless.
@@ -187,7 +196,7 @@ def configure(args):
     load_config()
     if 'configured' in config['settings']:
         sys.exit('Already configured')
-    for file in (key_file, keyful_file, keyless_file):
+    for file in (rootkey_file, keyful_file, keyless_file):
         if os.path.exists(file):
             sys.exit(
                 f"Can't configure when {file} already unexpectedly exists")
@@ -195,15 +204,15 @@ def configure(args):
         sys.exit(f'{crypttab_file} does not exist')
     # This will abort if /etc/crypttab is missing or has unexpected format.
     filesystems, keyless_content = make_keyless_content(crypttab_file)
-    with open(f'{key_file}.new', 'w') as f:
-        os.chmod(f'{key_file}.new', 0o400)
+    with open(f'{rootkey_file}.new', 'w') as f:
+        os.chmod(f'{rootkey_file}.new', 0o400)
         f.write(''.join(random.choices(string.ascii_letters, k=64)))
-    os.rename(f'{key_file}.new', key_file)
+    os.rename(f'{rootkey_file}.new', rootkey_file)
     for fs_num in range(len(filesystems)):
         (target, source) = filesystems[fs_num]
         if len(filesystems) > 1:
             print(f'Adding key to {target}')
-        subprocess.check_call(('cryptsetup', 'luksAddKey', source, key_file))
+        subprocess.check_call(('cryptsetup', 'luksAddKey', source, rootkey_file))
         config['settings'][f'source{fs_num}'] = source
     shutil.copyfile(crypttab_file, keyful_file)
     with open(f'{keyless_file}.new', 'w') as f:
@@ -233,8 +242,8 @@ def unconfigure(args):
                        if k.startswith('source')):
         source = config['settings'][source_key]
         subprocess.check_call(
-            ('cryptsetup', 'luksRemoveKey', source, key_file))
-    os.remove(key_file)
+            ('cryptsetup', 'luksRemoveKey', source, rootkey_file))
+    os.remove(rootkey_file)
     os.remove(config_file)
 
 
@@ -258,6 +267,7 @@ def enable_always(args, once=False):
     # Abort if already enabled, unless not doing once and in rc.local, in
     # which case remove from rc.local.
     # Abort if crypttab is different from crypttab.keyful.
+    # Create key_file and add to source filesystems using rootkey_file
     # Replace crypttab with crypttab.keyless.
     # Regenerate initrds.
     # Set enabled to true in config.
@@ -273,6 +283,20 @@ def enable_always(args, once=False):
         sys.exit('Already enabled')
     if not filecmp.cmp(crypttab_file, keyful_file):
         sys.exit(f'{crypttab_file} is different from {keyful_file}, aborting')
+    if not os.path.exists(crypttab_file):
+        sys.exit(f'{crypttab_file} does not exist')
+    # This will abort if /etc/crypttab is missing or has unexpected format.
+    filesystems, keyless_content = make_keyless_content(crypttab_file)
+    with open(f'{key_file}.new', 'w') as f:
+        os.chmod(f'{key_file}.new', 0o400)
+        f.write(''.join(random.choices(string.ascii_letters, k=64)))
+    os.rename(f'{key_file}.new', key_file)
+    for fs_num in range(len(filesystems)):
+        (target, source) = filesystems[fs_num]
+        if len(filesystems) > 1:
+            print(f'Adding key to {target}')
+        subprocess.check_call(('cryptsetup', 'luksAddKey', '-d', rootkey_file, source, key_file))
+        config['settings'][f'source{fs_num}'] = source
     shutil.copyfile(keyless_file, crypttab_file)
     subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
     config['settings']['enabled'] = 'true'
@@ -284,6 +308,7 @@ def disable(args):
     # Abort if not configured.
     # Abort if not enabled.
     # Abort if crypttab is different from crypttab.keyless.
+    # Remove key_file 
     # Replace crypttab with crypttab.keyful.
     # Regenerate initrds.
     # Remove enabled setting from config.
@@ -296,8 +321,14 @@ def disable(args):
         sys.exit("Can't disable if not enabled")
     if not filecmp.cmp(crypttab_file, keyless_file):
         sys.exit(f'{crypttab_file} is different from {keyless_file}, aborting')
+    for source_key in (k for k in config['settings'].keys()
+                       if k.startswith('source')):
+        source = config['settings'][source_key]
+        subprocess.check_call(
+            ('cryptsetup', 'luksRemoveKey', source, key_file))
     shutil.copyfile(keyful_file, crypttab_file)
     subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    os.remove(key_file)
     del config['settings']['enabled']
     save_config()
     if in_rc_local():
