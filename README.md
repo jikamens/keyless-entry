@@ -51,6 +51,14 @@ never set it up, run the script with the argument `unconfigure`.
   during reboot, it's important to run the script from its installed
   location as specified above.
 
+Credits
+-------
+
+Thank you to John Hancock <<john.m.hancock@gmail.com>> for helping to
+make the script more secure by adding logic to use a temporary key
+when enabling keyless entry along with a permanent key that's only
+accessible on the encrypted filesystem.
+
 Copyright
 ---------
 
