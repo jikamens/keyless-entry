@@ -91,12 +91,44 @@ def load_config():
         config.read(config_file)
     if 'settings' not in config:
         config['settings'] = {}
+    if 'version' not in config['settings']:
+        if config.getboolean('settings', 'configured', fallback=False):
+            # No root key file, no targets stored in config
+            config['settings']['version'] = '1'
+            upgrade_config()
+        else:
+            # Root key file, targets stored in config
+            config['settings']['version'] = '2'
 
 
 def save_config():
     with open(f'{config_file}.new', 'w') as f:
         config.write(f)
     os.rename(f'{config_file}.new', config_file)
+
+
+def upgrade_config():
+    print('Upgrading configuration for new script version')
+    if config['settings']['version'] == '2':
+        return
+    if config.getboolean('settings', 'enabled', fallback=False):
+        shutil.copy(key_file, rootkey_file)
+        config['settings']['v1key'] = 'true'
+    else:
+        shutil.move(key_file, rootkey_file)
+    filesystems, _ = make_keyless_content(keyful_file)
+    for i in range(len(filesystems)):
+        config['settings'][f'target{i}'] = filesystems[i][0]
+        config['settings'][f'source{i}'] = filesystems[i][1]
+    config['settings']['version'] = '2'
+    save_config()
+
+
+def get_filesystems():
+    return ((config['settings'][f'target{k[6:]}'],
+             config['settings'][f'source{k[6:]}'])
+            for k in config['settings'].keys()
+            if k.startswith('source'))
 
 
 def get_boot_mountpoint():
@@ -237,11 +269,11 @@ def unconfigure(args):
         sys.exit("Please disable before unconfiguring")
     os.remove(keyless_file)
     os.remove(keyful_file)
-    for source_key in (k for k in config['settings'].keys()
-                       if k.startswith('source')):
-        source = config['settings'][source_key]
-        subprocess.check_call(
-            ('cryptsetup', 'luksRemoveKey', source, rootkey_file))
+    if not config.getboolean('settings', 'v1key', fallback=False):
+        for target, source in get_filesystems():
+            print(f'Removing key from {target} ({source})')
+            subprocess.check_call(
+                ('cryptsetup', 'luksRemoveKey', source, rootkey_file))
     os.remove(rootkey_file)
     os.remove(config_file)
 
@@ -284,24 +316,17 @@ def enable_always(args, once=False):
         sys.exit(f'{crypttab_file} is different from {keyful_file}, aborting')
     if not os.path.exists(crypttab_file):
         sys.exit(f'{crypttab_file} does not exist')
-    sources = (k for k in config['settings'].keys()
-               if k.startswith('source'))
-    targets = (t for t in config['settings'].keys()
-               if t.startswith('target'))
-    filesystems = list(zip(targets, sources))
     with open(f'{key_file}.new', 'w') as f:
         os.chmod(f'{key_file}.new', 0o400)
         f.write(''.join(random.choices(string.ascii_letters, k=64)))
     os.rename(f'{key_file}.new', key_file)
-    for fs_num in range(len(filesystems)):
-        target = config['settings'][filesystems[fs_num][0]]
-        source = config['settings'][filesystems[fs_num][1]]
-        if len(filesystems) > 1:
-            print(f'Adding key to {target}')
+    for target, source in get_filesystems():
+        print(f'Adding key to {target} ({source})')
         subprocess.check_call(
                 ('cryptsetup', 'luksAddKey', '-d', rootkey_file,
-                    source, key_file))
-        config['settings'][f'source{fs_num}'] = source
+                 source, key_file))
+    if 'v1key' in config['settings']:
+        del config['settings']['v1key']
     shutil.copyfile(keyless_file, crypttab_file)
     subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
     config['settings']['enabled'] = 'true'
@@ -326,9 +351,8 @@ def disable(args):
         sys.exit("Can't disable if not enabled")
     if not filecmp.cmp(crypttab_file, keyless_file):
         sys.exit(f'{crypttab_file} is different from {keyless_file}, aborting')
-    for source_key in (k for k in config['settings'].keys()
-                       if k.startswith('source')):
-        source = config['settings'][source_key]
+    for target, source in get_filesystems():
+        print(f'Removing key from {target} ({source})')
         subprocess.check_call(
             ('cryptsetup', 'luksRemoveKey', source, key_file))
     shutil.copyfile(keyful_file, crypttab_file)
