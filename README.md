@@ -8,10 +8,10 @@ Home page: <https://github.com/jikamens/keyless-entry>
 Introduction
 ------------
 
-LUKS filesystem encryption on Linux Linux is great, but sometimes you
-want to be able to reboot your system without needing to enter a
-decryption key on reboot, e.g., if you need to reboot it remotely.
-This script helps you do that.
+LUKS filesystem encryption on Linux is great, but sometimes you want
+to be able to reboot your system without needing to enter a decryption
+key on reboot, e.g., if you need to reboot it remotely. This script
+helps you do that.
 
 The mechanism of this script is based on the approach that
 [Tobias](https://askubuntu.com/users/344231/tobias) outlined in
