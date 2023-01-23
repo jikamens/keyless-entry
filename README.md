@@ -23,6 +23,13 @@ Installation
 
 Copy the file `keyless-entry` to somewhere in your root filesystem, e.g., `/usr/local/bin`, and make sure it is executable.
 
+You also need the `cryptsetup` utility to be installed, and you
+probably also need the `cryptsetup` integration with `initramfs`. In
+recent Ubuntu releases, you get these by installing the
+`cryptsetup-bin` and `cryptsetup-initramfs` packages. You may need
+other packages on other Linux distributions. If you know what's needed
+for another OS, feel free to submit a PR to update this README.
+
 Usage
 -----
 
