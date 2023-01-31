@@ -383,8 +383,25 @@ def parse_args():
     return args
 
 
+def add_to_search_path(_dir):
+    dirs = os.environ['PATH'].split(':')
+    if _dir not in dirs:
+        dirs.append(_dir)
+        os.environ['PATH'] = ':'.join(dirs)
+
+
 def main():
     args = parse_args()
+    # Need to make sure we can find cryptsetup and update-initramfs
+    add_to_search_path('/sbin')
+    add_to_search_path('/usr/sbin')
+    path_good = True
+    for cmd in ('cryptsetup', 'update-initramfs'):
+        if shutil.which(cmd) is None:
+            print(f"Can't find {cmd} in search path", file=sys.stderr)
+            path_good = False
+    if not path_good:
+        sys.exit(1)
     args.func(args)
 
 
