@@ -1,7 +1,7 @@
 Keyless Entry
 =============
 
-Easily switch on/off keyless reboot for Linux systems with LUKS encryption
+Easily switch on/off keyless reboot for ext4 Linux systems with LUKS encryption
 
 Home page: <https://github.com/jikamens/keyless-entry>
 
@@ -17,6 +17,10 @@ The mechanism of this script is based on the approach that
 [Tobias](https://askubuntu.com/users/344231/tobias) outlined in
 <https://askubuntu.com/a/997668>. Thank you to Tobias for leading the
 way!
+
+This script is only known to work with ext4 filesystems, and probably
+does not work with ZFS. Pull requests to remedy that will be
+gratefully accepted.
 
 Installation
 ------------
