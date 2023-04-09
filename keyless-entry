@@ -496,9 +496,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Manage password-free '
                                      'reboots of encrypted Linux hosts')
     subparsers = parser.add_subparsers(required=True)
-    configure_parser = subparsers.add_parser('configure')
+    configure_parser = subparsers.add_parser(
+        'configure', help='Do initial configuration required before use')
     configure_parser.set_defaults(func=configure)
-    unconfigure_parser = subparsers.add_parser('unconfigure')
+    unconfigure_parser = subparsers.add_parser(
+        'unconfigure', help='Undo configuration, restoring system to pristine '
+        'state')
     unconfigure_parser.set_defaults(func=unconfigure)
 
     kernel_version_parser = argparse.ArgumentParser(add_help=False)
@@ -509,13 +512,16 @@ def parse_args():
                        help='Only enable for the specified kernel version(s)')
 
     enable_once_parser = subparsers.add_parser(
-        'enable-once', parents=[kernel_version_parser])
+        'enable-once', parents=[kernel_version_parser],
+        help='Enable no passphrase for just the next boot')
     enable_once_parser.set_defaults(func=enable_once)
     enable_always_parser = subparsers.add_parser(
-        'enable-always', parents=[kernel_version_parser])
+        'enable-always', parents=[kernel_version_parser],
+        help='Enable no passphrase for all boots')
     enable_always_parser.set_defaults(func=enable_always)
 
-    disable_parser = subparsers.add_parser('disable')
+    disable_parser = subparsers.add_parser(
+        'disable', help='Disable previously enabled no passphrase')
     disable_parser.set_defaults(func=disable)
 
     args = parser.parse_args()
