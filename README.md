@@ -62,6 +62,11 @@ To disable keyless entry, run the script again with the argument
 `disable`. To remove the configuration from your system as if you had
 never set it up, run the script with the argument `unconfigure`.
 
+If you end up in a bad state where keyless entry is partially enabled
+and you want to restore a known state, run the script with the
+argument `recover`, which disables keyless entry even if it isn't
+fully enabled and rebuilds all the initial RAM disks.
+
 ### Important `enable-once` notes
 
 * Your initial ramdisks are regenerated as part of the reboot process,

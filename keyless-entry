@@ -30,6 +30,9 @@
 # enable-once   - Enable keyless entry just for the next reboot
 # enable-always - Enable keyless entry until it's disabled
 # disable       - Disable keyless entry
+# recover       - Same as disable, but clean up even if not fully
+#                 enabled and rebuild all initial RAM disks even if
+#                 enable was only told to enable a subset of them.
 #
 # enable-once works by doing configuring /etc/rc.local to call the
 # script with the disable argument at the end of the reboot sequence,
@@ -454,12 +457,13 @@ def enable_always(args, once=False):
     save_config()
 
 
-def disable(args):
+def disable(args, recover=False):
     # Load config.
     # Abort if not configured.
-    # Abort if not enabled.
-    # Abort if crypttab is different from crypttab.keyless.
-    # Remove key_file
+    # Abort if not enabled unless recover is True.
+    # Abort if crypttab is different from crypttab.keyless, unless
+    #   recover is True and it's the same as crypttab.keyful.
+    # Remove key_file (ok to not exist if recover is True).
     # Replace crypttab with crypttab.keyful.
     # Regenerate initrds.
     # Remove enabled setting from config.
@@ -469,27 +473,44 @@ def disable(args):
     load_config()
     if not config.getboolean('settings', 'configured', fallback=False):
         sys.exit("Can't disable if not yet configured")
-    if not config.getboolean('settings', 'enabled', fallback=False):
+    if not (recover or config.getboolean('settings', 'enabled', fallback=False)):
         sys.exit("Can't disable if not enabled")
-    if not filecmp.cmp(crypttab_file, keyless_file):
+    if not (filecmp.cmp(crypttab_file, keyless_file) or
+            recover and filecmp.cmp(crypttab_file, keyful_file)):
         sys.exit(f'{crypttab_file} is different from {keyless_file}, aborting')
     for target, source in get_filesystems():
         print(f'Removing key from {target} ({source})')
-        subprocess.check_call(
-            ('cryptsetup', 'luksRemoveKey', source, key_file))
+        try:
+            subprocess.check_call(
+                ('cryptsetup', 'luksRemoveKey', source, key_file))
+        except subprocess.CalledProcessError:
+            if not recover:
+                raise
     shutil.copyfile(keyful_file, crypttab_file)
     # At some point far into the future perhaps we can remove the backward
     # compatibility here and below and assume that kernel_versions is set.
     # *shrug*
-    for version in re.split(r'\s*,\s*', config['settings'].get(
-            'kernel_versions', 'all')):
+    if recover:
+        kernel_versions = ['all']
+    else:
+        kernel_versions = re.split(r'\s*,\s*', config['settings'].get(
+            'kernel_versions', 'all'))
+    for version in kernel_versions:
         subprocess.check_call(('update-initramfs', '-c', '-k', version))
-    os.remove(key_file)
-    del config['settings']['enabled']
+    try:
+        os.remove(key_file)
+    except FileNotFoundError:
+        if not recover:
+            raise
+    config['settings'].pop('enabled', None)
     config['settings'].pop('kernel_versions', None)
     save_config()
     if in_rc_local():
         remove_from_rc_local()
+
+
+def recover(args):
+    return disable(args, recover=True)
 
 
 def parse_args():
@@ -523,6 +544,9 @@ def parse_args():
     disable_parser = subparsers.add_parser(
         'disable', help='Disable previously enabled no passphrase')
     disable_parser.set_defaults(func=disable)
+    recover_parser = subparsers.add_parser(
+        'recover', help='Recover from partial enable')
+    recover_parser.set_defaults(func=recover)
 
     args = parser.parse_args()
     if 'default_kernel' in args and args.default_kernel:
