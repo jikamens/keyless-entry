@@ -48,6 +48,16 @@ To do that, run the script again, this time with the argument
 specify `enable-once` then no key will be required for the next reboot
 but subsequent reboots will require it.
 
+You can specify `--default-kernel` with `enable-once` or
+`enable-always` to only enable for the default kernel that grub will
+use the next time it boots, or you can specify `--kernel-version` one
+or more times to specify one or more kernel versions to enable for.
+Otherwise enable and disable impact all installed kernels. The reason
+why you would want to only enable for a subset of installed kernels is
+because it makes enable and disable faster since fewer initial RAM
+disks need to be rebuilt, and in the case of `enable-once`, this also
+makes the next reboot finish faster (as noted below).
+
 To disable keyless entry, run the script again with the argument
 `disable`. To remove the configuration from your system as if you had
 never set it up, run the script with the argument `unconfigure`.

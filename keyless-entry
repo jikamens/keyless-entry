@@ -36,6 +36,16 @@
 # so wherever you invoke the script from with enable-once needs to be
 # accessible on boot and executable or it won't work.
 #
+# You can specify --default-kernel with enable-once or enable-always
+# to only enable for the default kernel that grub will use the next
+# time it boots, or you can specify --kernel-version one or more times
+# to specify one or more kernel versions to enable for. Otherwise
+# enable and disable impact all installed kernels. The reason why you
+# would want to only enable for a subset of installed kernels is
+# because it makes enable and disable faster since fewer initial RAM
+# disks need to be rebuilt, and in the case of enable-once, this also
+# makes the next reboot finish faster.
+#
 # You will be prompted to enter an existing LUKS key (passphrase)
 # once for each encrypted device during configure. This will add a
 # master key that should be stored on an encrypted partition to allow
@@ -67,6 +77,7 @@ import json
 import re
 import os
 import random
+import shlex
 import shutil
 import string
 import subprocess
@@ -78,10 +89,114 @@ key_file = f'/boot{key_file_tail}'
 crypttab_file = '/etc/crypttab'
 keyful_file = f'{crypttab_file}.keyful'
 keyless_file = f'{crypttab_file}.keyless'
-rootkey_file = f'/etc/keyless-master'
+rootkey_file = '/etc/keyless-master'
 rc_local = '/etc/rc.local'
 
 config = None
+
+
+#
+# Begin GRUB parsing code
+#
+
+# The code in this section is used to determine the default kernel when
+# --default-kernel is specified to enable-once or enable-always.
+
+def dequote(string):
+    return re.sub(r'^([\'\"]?)(.*)\1$', r'\2', string)
+
+
+def grub_get_default(path=None):
+    if path is None:
+        path = '/etc/default/grub'
+    with open(path) as f:
+        for line in f:
+            match = re.match(r'\s*GRUB_DEFAULT\s*=\s*(.*?)\s*$', line)
+            if match:
+                return dequote(match[1])
+    return None
+
+
+def grub_get_saved_entry(path=None):
+    if path is None:
+        path = '/boot/grub/grubenv'
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            match = re.match(r'\s*saved_entry\s*=\s*(.*?)\s*$', line)
+            if match:
+                return dequote(match[1])
+    return None
+
+
+def grub_cfg_iter(path=None):
+    if path is None:
+        path = '/boot/grub/grub.cfg'
+    parents = []
+    menu_index = 0
+
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument('title', action='store')
+    arg_parser.add_argument('--class', action='store')
+    arg_parser.add_argument('--users', action='store')
+    arg_parser.add_argument('--unrestricted', action='store_true')
+    arg_parser.add_argument('--hotkey', action='store')
+    arg_parser.add_argument('--id', action='store')
+    arg_parser.add_argument('old_id', nargs='?')
+
+    with open(path) as f:
+        for line in f:
+            if parents:
+                if re.match(r'\s*\}\s*$', line):
+                    parents.pop()
+                    menu_index += 1
+                    continue
+                match = re.match(r'\s*initrd\s+/initrd\.img-(.*?)\s*$', line)
+                if match:
+                    yield ([(m['menu_index'], m['title'], m['id'])
+                            for m in parents], match[1])
+            match = re.match(r'\s*(menuentry|submenu)\s+(.*?)\s*\{\s*$', line)
+            if not match:
+                continue
+
+            entry_type = match[1]
+            args = arg_parser.parse_args(shlex.split(match[2].replace(
+                '$menuentry_id_option', '--id')))
+            parents.append({
+                'title': args.title,
+                'id': args.id or args.old_id,
+                'entry_type': entry_type,
+                'menu_index': str(menu_index)
+            })
+            if entry_type == 'submenu':
+                menu_index = 0
+
+
+def grub_get_cfg_kernel_version(selector, path=None):
+    for entries, kernel_version in grub_cfg_iter(path):
+        selectors = re.split(r'\s*>\s*', selector)
+        while selectors and entries:
+            if selectors.pop(0) not in entries.pop(0):
+                break
+        else:
+            if not (selectors or entries):
+                return kernel_version
+    return None
+
+
+def grub_get_default_kernel_version(
+        cfg_path=None, default_path=None, grubenv_path=None):
+    default = grub_get_default(path=default_path)
+    if default == 'saved':
+        default = grub_get_saved_entry(path=grubenv_path)
+    if not default:
+        default = '0'
+    return grub_get_cfg_kernel_version(default, path=cfg_path)
+
+#
+# End GRUB parsing code
+#
 
 
 def load_config():
@@ -302,6 +417,7 @@ def enable_always(args, once=False):
     # Replace crypttab with crypttab.keyless.
     # Regenerate initrds.
     # Set enabled to true in config.
+    # Set kernel versions in config.
     # Save config.
     load_config()
     if not config.getboolean('settings', 'configured', fallback=False):
@@ -328,7 +444,12 @@ def enable_always(args, once=False):
     if 'v1key' in config['settings']:
         del config['settings']['v1key']
     shutil.copyfile(keyless_file, crypttab_file)
-    subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    if args.kernel_version[0] == 'all':
+        subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    else:
+        for version in args.kernel_version:
+            subprocess.check_call(('update-initramfs', '-c', '-k', version))
+    config['settings']['kernel_versions'] = ','.join(args.kernel_version)
     config['settings']['enabled'] = 'true'
     save_config()
 
@@ -342,6 +463,7 @@ def disable(args):
     # Replace crypttab with crypttab.keyful.
     # Regenerate initrds.
     # Remove enabled setting from config.
+    # Remove kernel_versions setting from config.
     # Save config.
     # Remove disable command from rc.local if it's there.
     load_config()
@@ -356,9 +478,15 @@ def disable(args):
         subprocess.check_call(
             ('cryptsetup', 'luksRemoveKey', source, key_file))
     shutil.copyfile(keyful_file, crypttab_file)
-    subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
+    # At some point far into the future perhaps we can remove the backward
+    # compatibility here and below and assume that kernel_versions is set.
+    # *shrug*
+    for version in re.split(r'\s*,\s*', config['settings'].get(
+            'kernel_versions', 'all')):
+        subprocess.check_call(('update-initramfs', '-c', '-k', version))
     os.remove(key_file)
     del config['settings']['enabled']
+    config['settings'].pop('kernel_versions', None)
     save_config()
     if in_rc_local():
         remove_from_rc_local()
@@ -372,14 +500,36 @@ def parse_args():
     configure_parser.set_defaults(func=configure)
     unconfigure_parser = subparsers.add_parser('unconfigure')
     unconfigure_parser.set_defaults(func=unconfigure)
-    enable_once_parser = subparsers.add_parser('enable-once')
+
+    kernel_version_parser = argparse.ArgumentParser(add_help=False)
+    group = kernel_version_parser.add_mutually_exclusive_group()
+    group.add_argument('--default-kernel', action='store_true',
+                       help='Only enable for the default kernel')
+    group.add_argument('--kernel-version', action='append', default=[],
+                       help='Only enable for the specified kernel version(s)')
+
+    enable_once_parser = subparsers.add_parser(
+        'enable-once', parents=[kernel_version_parser])
     enable_once_parser.set_defaults(func=enable_once)
-    enable_always_parser = subparsers.add_parser('enable-always')
+    enable_always_parser = subparsers.add_parser(
+        'enable-always', parents=[kernel_version_parser])
     enable_always_parser.set_defaults(func=enable_always)
+
     disable_parser = subparsers.add_parser('disable')
     disable_parser.set_defaults(func=disable)
 
     args = parser.parse_args()
+    if 'default_kernel' in args and args.default_kernel:
+        args.kernel_version = [grub_get_default_kernel_version()]
+        if args.kernel_version[0] is None:
+            parser.error("Couldn't determine default kernel version")
+    elif 'kernel_version' in args and not args.kernel_version:
+        args.kernel_version = ['all']
+    elif 'kernel_version' in args:
+        for version in args.kernel_version:
+            if ',' in version:
+                parser.error("Kernel version numbers can't have commas in them")
+        
     return args
 
 
