@@ -478,7 +478,8 @@ def disable(args, recover=False):
     load_config()
     if not config.getboolean('settings', 'configured', fallback=False):
         sys.exit("Can't disable if not yet configured")
-    if not (recover or config.getboolean('settings', 'enabled', fallback=False)):
+    if not (recover or
+            config.getboolean('settings', 'enabled', fallback=False)):
         sys.exit("Can't disable if not enabled")
     if not (filecmp.cmp(crypttab_file, keyless_file) or
             recover and filecmp.cmp(crypttab_file, keyful_file)):
@@ -568,8 +569,9 @@ def parse_args():
     elif 'kernel_version' in args:
         for version in args.kernel_version:
             if ',' in version:
-                parser.error("Kernel version numbers can't have commas in them")
-        
+                parser.error(
+                    "Kernel version numbers can't have commas in them")
+
     return args
 
 
