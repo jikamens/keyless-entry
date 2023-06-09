@@ -75,6 +75,7 @@
 
 import argparse
 import configparser
+import datetime
 import filecmp
 import json
 import re
@@ -156,10 +157,12 @@ def grub_cfg_iter(path=None):
                     parents.pop()
                     menu_index += 1
                     continue
-                match = re.match(r'\s*initrd\s+/initrd\.img-(.*?)\s*$', line)
+                match = re.match(r'\s*initrd\s+(/initrd\.img-(.*?))\s*$', line)
                 if match:
                     yield ([(m['menu_index'], m['title'], m['id'])
-                            for m in parents], match[1])
+                            for m in parents],
+                           match[2],
+                           f'/boot/{match[1]}')
             match = re.match(r'\s*(menuentry|submenu)\s+(.*?)\s*\{\s*$', line)
             if not match:
                 continue
@@ -178,7 +181,7 @@ def grub_cfg_iter(path=None):
 
 
 def grub_get_cfg_kernel_version(selector, path=None):
-    for entries, kernel_version in grub_cfg_iter(path):
+    for entries, kernel_version, initrd_path in grub_cfg_iter(path):
         selectors = re.split(r'\s*>\s*', selector)
         while selectors and entries:
             if selectors.pop(0) not in entries.pop(0):
@@ -421,7 +424,7 @@ def enable_always(args, once=False):
     # Replace crypttab with crypttab.keyless.
     # Regenerate initrds.
     # Set enabled to true in config.
-    # Set skipped kernel versions in config.
+    # Set enable timestamp in config.
     # Save config.
     load_config()
     if not config.getboolean('settings', 'configured', fallback=False):
@@ -448,17 +451,14 @@ def enable_always(args, once=False):
     if 'v1key' in config['settings']:
         del config['settings']['v1key']
     shutil.copyfile(keyless_file, crypttab_file)
-    all_kernels = args.kernel_version[0] == 'all'
-    if all_kernels:
+    start_time = datetime.datetime.utcnow().isoformat(timespec='seconds') + "Z"
+    if args.kernel_version[0] == 'all':
         subprocess.check_call(('update-initramfs', '-c', '-k', 'all'))
-        config['settings']['skip_kernel_versions'] = 'none'
     else:
         for version in args.kernel_version:
             subprocess.check_call(('update-initramfs', '-c', '-k', version))
-        config['settings']['skip_kernel_versions'] = ','.join(sorted(set(
-            entry[1] for entry in grub_cfg_iter()
-            if entry[1] not in args.kernel_version)))
     config['settings']['enabled'] = 'true'
+    config['settings']['enabled_at'] = start_time
     save_config()
 
 
@@ -472,7 +472,7 @@ def disable(args, recover=False):
     # Replace crypttab with crypttab.keyful.
     # Regenerate initrds.
     # Remove enabled setting from config.
-    # Remove skip_kernel_versions setting from config.
+    # Remove enable timestamp from config.
     # Save config.
     # Remove disable command from rc.local if it's there.
     load_config()
@@ -493,16 +493,18 @@ def disable(args, recover=False):
             if not recover:
                 raise
     shutil.copyfile(keyful_file, crypttab_file)
-    # At some point far into the future perhaps we can remove the backward
-    # compatibility here and below and assume that skip_kernel_versions is set.
-    # *shrug*
-    if recover:
-        skip_kernel_versions = ['none']
-    else:
-        skip_kernel_versions = re.split(r'\s*,\s*', config['settings'].get(
-            'skip_kernel_versions', 'none'))
-    for version in sorted(set(entry[1] for entry in grub_cfg_iter()
-                              if entry[1] not in skip_kernel_versions)):
+    try:
+        enabled_at = datetime.datetime.fromisoformat(
+            config['settings']['enabled_at']).timestamp()
+    except KeyError:
+        enabled_at = 0
+    for version, initrd_path in sorted(set((e[1], e[2])
+                                           for e in grub_cfg_iter())):
+        try:
+            if os.stat(initrd_path).st_mtime < enabled_at:
+                continue
+        except FileNotFoundError:
+            pass
         subprocess.check_call(('update-initramfs', '-c', '-k', version))
     try:
         os.remove(key_file)
@@ -510,11 +512,10 @@ def disable(args, recover=False):
         if not recover:
             raise
     config['settings'].pop('enabled', None)
+    config['settings'].pop('enabled_at', None)
     # Backward compatibility for the old version of the script that set
-    # kernel_versions instead of skip_kernel_versions. At some point perhaps
-    # we can remove this. *shrug*
+    # kernel_versions. At some point perhaps we can remove this. *shrug*
     config['settings'].pop('kernel_versions', None)
-    config['settings'].pop('skip_kernel_versions', None)
     save_config()
     if in_rc_local():
         remove_from_rc_local()
