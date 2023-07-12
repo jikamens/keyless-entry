@@ -498,6 +498,13 @@ def disable(args, recover=False):
             config['settings']['enabled_at']).timestamp()
     except KeyError:
         enabled_at = 0
+    except ValueError:
+        # This is for compatibility with Python before 3.11. Remove this block
+        # when 3.10 is no longer supported.
+        enabled_at = datetime.datetime.fromisoformat(
+            config['settings']['enabled_at'][0:-1]).\
+            replace(tzinfo=datetime.timezone.utc).timestamp()
+
     for version, initrd_path in sorted(set((e[1], e[2])
                                            for e in grub_cfg_iter())):
         try:
