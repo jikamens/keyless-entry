@@ -85,6 +85,12 @@ make the script more secure by adding logic to use a temporary key
 when enabling keyless entry along with a permanent key that's only
 accessible on the encrypted filesystem.
 
+Generative AI policy
+--------------------
+This project does not solicit or accept work produced with substantive assistance from generative AI. Only [hand-crafted code][hcc] is welcome here.
+
+[hcc]: https://handcraftedcode.org
+
 Copyright
 ---------
 
